@@ -1,7 +1,7 @@
 include *.md
 include LICENSE.txt
 
-recursive-include openptv_gpu/Tutorials *
+recursive-include openptv_gpu/tutorials *
 recursive-exclude openptv_gpu/__pycache__ *
 
 recursive-include openptv_gpu *.ipynb
