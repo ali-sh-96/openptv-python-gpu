@@ -1,0 +1,10 @@
+include *.md
+include LICENSE.txt
+
+recursive-include openptv_gpu/Tutorials *
+recursive-exclude openptv_gpu/__pycache__ *
+
+recursive-include openptv_gpu *.ipynb
+recursive-include openptv_gpu *.py
+recursive-include openptv_gpu *.tif
+recursive-include openptv_gpu *.png
