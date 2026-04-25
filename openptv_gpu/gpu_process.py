@@ -9,139 +9,315 @@ from cupyx.scipy.interpolate import interpn
 from cupyx.scipy.ndimage import gaussian_laplace, maximum_filter, label
 
 from . import DTYPE_b, DTYPE_i, DTYPE_u, DTYPE_f
-from .gpu_validation import ValidationGPU, Num_VALIDATION_ITERS, VALIDATION_SIZE, MEDIAN_TOL, MAD_TOL, EPSILON
-import time
+from .gpu_validation import ValidationGPU, Num_VALIDATION_ITERS, VALIDATION_SIZE, MAX_VALIDATION_SIZE
+from .gpu_validation import MEDIAN_TOL, MAD_TOL, EPSILON
 
+# Default settings.
 PARTICLE_METHOD = "log"
-PARTICLE_SIZE = 1
-THRESHOLD = 0
 SUBPIXEL_METHOD = "gaussian"
-
+THRESHOLD = 0
+PARTICLE_SIZE = 1
 SEARCH_SIZE = 8
 CLUSTER_SIZE = 8
-
-NUM_RELAXATION_ITERS = 1
-RELAXATION_METHOD = "unidirectional"
-SIGMA = 1
-BATCH_SIZE = 1
-
-BLOCK_SIZE = 32
 KERNEL_SIZE = 128
+NUM_RELAXATION_ITERS = 1
+SIGMA = 1
+RELAXATION_METHOD = "unidirectional"
+FIELD_TOL = None
+BATCH_SIZE = 1
+BLOCK_SIZE = 32
 
-ALLOWED_SUBPIXEL_METHODS = {"gaussian", "parabolic", "centroid"}
+# Allowed settings.
 ALLOWED_PARTICLE_METHODS = {"log", "agt"}
+ALLOWED_SUBPIXEL_METHODS = {"gaussian", "parabolic", "centroid"}
+ALLOWED_RELAXATION_METHODS = {"unidirectional", "bidirectional"}
 
-class PTVGPU:
-    """Bidirectional relaxation PTV algorithm.
-    
-    The algorithm involves utilizing the estimated displacement field from PIV to search for candidate matches in
-    the second frame. For a given window size, multiple iterations can be conducted before the estimated velocity is
-    onto a finer mesh. This procedure continues until the desired final mesh and the specified interpolated number of
-    iterations are achieved.
-    
-    Algorithm Details
-    -----------------
-    Only window sizes that are multiples of 8 and a power of 2 are supported, and the minimum window size is 8.
-    By default, windows are shifted symmetrically to reduce bias errors.
-    The obtained displacement is the total dispalement for first iteration and the residual displacement dc for
-    second iteration onwards.
-    The new displacement is computed by adding the residual displacement to the previous estimation.
-    Validation may be done by any combination of signal-to-noise ratio, median, median-absolute-deviation (MAD),
-    mean, and root-mean-square (RMS) velocities.
-    Smoothn can be used between iterations to improve the estimate and replace missing values.
-    
-    References
-    ----------
-    Scarano, F., & Riethmuller, M. L. (1999). Iterative multigrid approach in PIV image processing with discrete window
-        offset. Experiments in Fluids, 26, 513-523.
-        https://doi.org/10.1007/s003480050318
-    Meunier, P., & Leweke, T. (2003). Analysis and treatment of errors due to high velocity gradients in particle image
-        velocimetry. Experiments in fluids, 35(5), 408-421.
-        https://doi.org/10.1007/s00348-003-0673-2
-    Garcia, D. (2010). Robust smoothing of gridded data in one and higher dimensions with missing values. Computational
-        statistics & data analysis, 54(4), 1167-1178.
-        https://doi.org/10.1016/j.csda.2009.09.020
-    Shirinzad, A., Jaber, K., Xu, K., & Sullivan, P. E. (2023). An Enhanced Python-Based Open-Source Particle Image
-        Velocimetry Software for Use with Central Processing Units. Fluids, 8(11), 285.
-        https://doi.org/10.3390/fluids8110285
+class ptv_gpu:
+    """Wrapper-class for PTVGPU that further applies input validation and provides user inetrface.
     
     Parameters
     ----------
     frame_shape : tuple
         Shape of the images in pixels.
-    min_search_size : int
-        Length of the sides of the square search window. Only supports multiples of 8 and powers of 2.
-    search_size_iters : int or tuple, optional
-        The length of this tuple represents the number of different window sizes to be used, and each entry specifies
-        the number of times a particular window size is used.
-    overlap_ratio : float or tuple, optional
-        Ratio of the overlap between two windows (between 0 and 1) for different window sizes.
-    shrink_ratio : float, optional
-        Ratio (between 0 and 1) to shrink the window size for the first frame to use on the first iteration.
-    center : bool, optional
-        Whether to center the field with respect to the frame edges.
-    deforming_order : int or tuple, optional (not active for the current GPU version)
-        Order of the interpolation used for window deformation.
-    normalize : bool or tuple, optional
-        Whether to normalize the window intensity by subtracting the mean intensity.
-    mask_zero: bool, optional
-        Whether to mask the center of the cross-correlation map.
-    subpixel_method : {"gaussian", "centroid", "parabolic"} or tuple, optional
-        Method to estimate the subpixel location of the peak at each iteration.
-    n_fft : int or tuple, optional
-        Size-factor of the 2D FFT. n_fft of 2 is recommended for the smallest window size.
-    deforming_par : float or tuple, optional
-        Ratio (between 0 and 1) of the previous velocity used to deform each frame at every iteration.
-        A default value of 0.5 is recommended to minimize the bias errors. A value of 1 corresponds to only
-        second frame deformation.
-    batch_size : int or "full" or tuple, optional
-        Batch size for cross-correlation at every iteration.
-    s2n_method : {"peak2peak", "peak2mean", "peak2energy"} or tuple, optional
-        Method of the signal-to-noise ratio measurement.
-    s2n_size : int or tuple, optional
-        Half size of the region around the first correlation peak to ignore for finding the second peak.
-        Default of 2 is only used if s2n_method == "peak2peak".
-    validation_size : int or tuple, optional
-        Size parameter for the validation kernel, kernel_size = 2 * size + 1.
-    s2n_tol : float or None or tuple, optional
-        Tolerance for the signal-to-noise (S2N) validation at every iteration.
-    median_tol : float or None or tuple, optional
-        Tolerance for the median velocity validation at every iteration.
-    mad_tol : float or None or tuple, optional
-        Tolerance for the median-absolute-deviation (MAD) velocity validation at every iteration.
-    mean_tol : float or None or tuple, optional
-        Tolerance for the mean velocity validation at every iteration.
-    rms_tol : float or None or tuple, optional
-        Tolerance for the root-mean-square (RMS) validation at every iteration.
-    num_replacing_iters : int or tuple, optional
-        Number of iterations per replacement cycle.
-    replacing_method : {"spring", "median", "mean"} or tuple, optional
-        Method to use for replacement.
-    replacing_size : int or tuple, optional
-        Size parameter for the replacement kernel, kernel_size = 2 * size + 1.
-    revalidate : bool or tuple, optional
-        Whether to revalidate the fields after every replecement iteration.
-    smooth : bool or tuple, optional
-        Whether to smooth the fields. Ignored for the last iteration.
-    smoothing_par : float or None or tuple, optional
-        Smoothing parameter to pass to smoothn to apply to the velocity fields.
-    dt : float, optional
-        Time delay separating the two frames.
-    scaling_par : int, optional
-        Scaling factor to apply to the velocity fields.
-    mask : ndarray or None, optional
-        2D array with non-zero values indicating the masked locations.
-    dtype_f : str, optional
-        Float data type. Default of single precision is used if not specified.
+    **kwargs
+        PTV settings. See PTVGPU.
     
     Attributes
     ----------
-    coords : tuple
-        A tuple of 2D arrays, (x, y) coordinates, where the velocity field is computed.
-    field_mask : ndarray
-        2D boolean array of masked locations for the last iteration.
-    s2n_ratio : ndarray
-        Signal-to-noise ratio of the cross-correlation map for the last iteration.
+    init_coords : tuple of ndarray
+        Arrays (x, y) of initially detected particle positions.
+    coords : tuple of ndarray
+        Arrays (x, y) of matched particle positions after tracking.
+    
+    """
+    def __init__(self, frame_shape, **kwargs):
+        particle_method = kwargs["particle_method"] if "particle_method" in kwargs else PARTICLE_METHOD
+        subpixel_method = kwargs["subpixel_method"] if "subpixel_method" in kwargs else SUBPIXEL_METHOD
+        threshold = kwargs["threshold"] if "threshold" in kwargs else THRESHOLD
+        particle_size = kwargs["particle_size"] if "particle_size" in kwargs else PARTICLE_SIZE
+        search_size = kwargs["search_size"] if "search_size" in kwargs else SEARCH_SIZE
+        cluster_size = kwargs["cluster_size"] if "cluster_size" in kwargs else CLUSTER_SIZE
+        kernel_size = kwargs["kernel_size"] if "kernel_size" in kwargs else KERNEL_SIZE
+        batch_size = kwargs["batch_size"] if "batch_size" in kwargs else BATCH_SIZE
+        num_relaxation_iters = kwargs["num_relaxation_iters"] if "num_relaxation_iters" in kwargs else NUM_RELAXATION_ITERS
+        relaxation_constant = kwargs["relaxation_constant"] if "relaxation_constant" in kwargs else SIGMA
+        relaxation_method = kwargs["relaxation_method"] if "relaxation_method" in kwargs else RELAXATION_METHOD
+        num_validation_iters = kwargs["num_validation_iters"] if "num_validation_iters" in kwargs else Num_VALIDATION_ITERS
+        validation_size = kwargs["validation_size"] if "validation_size" in kwargs else VALIDATION_SIZE
+        max_validation_size = kwargs["max_validation_size"] if "max_validation_size" in kwargs else MAX_VALIDATION_SIZE
+        field_tol = kwargs["field_tol"] if "field_tol" in kwargs else FIELD_TOL
+        median_tol = kwargs["median_tol"] if "median_tol" in kwargs else MEDIAN_TOL
+        mad_tol = kwargs["mad_tol"] if "mad_tol" in kwargs else MAD_TOL
+        epsilon = kwargs["epsilon"] if "epsilon" in kwargs else EPSILON
+        dt = kwargs["dt"] if "dt" in kwargs else 1
+        scaling_par = kwargs["scaling_par"] if "scaling_par" in kwargs else 1
+        mask = kwargs["mask"] if "mask" in kwargs else None
+        dtype_f = "float32"
+        
+        # Check the geometry settings.
+        self.frame_shape = frame_shape
+        assert isinstance(self.frame_shape, tuple) and \
+            len(self.frame_shape) == 2 and \
+                all(isinstance(item, int) for item in self.frame_shape), \
+                    "{} must be a tuple of {} numbers.".format("frame_shape", "int")
+        
+        self.n_dims = len(self.frame_shape)
+        self.particle_method = particle_method
+        assert self.particle_method in ALLOWED_PARTICLE_METHODS, \
+            "{} must be one of {}.".format("particle_method", ALLOWED_PARTICLE_METHODS)
+        
+        self.subpixel_method = subpixel_method
+        assert self.subpixel_method in ALLOWED_SUBPIXEL_METHODS, \
+            "{} must be one of {}.".format("subpixel_method", ALLOWED_SUBPIXEL_METHODS)
+        
+        self.threshold = (threshold,) * self.n_dims if isinstance(threshold, int) or \
+            isinstance(threshold, float) else threshold
+        assert isinstance(self.threshold, tuple) and \
+            all(isinstance(item, int) or isinstance(item, float) for item in self.threshold), \
+                "{} must be a tuple of {} numbers.".format("threshold", "real")
+        
+        self.particle_size = (particle_size,) * self.n_dims if isinstance(particle_size, int) \
+            else particle_size
+        assert isinstance(self.particle_size, tuple) and \
+            all(isinstance(item, int) and item >= 1 for item in self.particle_size), \
+                "{} must be a tuple of {} numbers.".format("particle_size", "integer")
+        
+        # Check the relaxation settings.
+        self.search_size = search_size
+        assert isinstance(self.search_size, int) and self.search_size >= 1, \
+            "{} must be an {} number greater than zero.".format("search_size", "integer")
+        
+        self.cluster_size = cluster_size
+        assert isinstance(self.cluster_size, int) and self.cluster_size >= 1, \
+            "{} must be an {} greater than zero.".format("cluster_size", "integer")
+        
+        self.kernel_size = kernel_size
+        assert isinstance(self.kernel_size, int) and 32 <= self.kernel_size <= 1024 and\
+            (self.kernel_size & (self.kernel_size - 1)) == 0,\
+                "{} must be a positive power of 2 between 32 and 1024.".format("kernel_size")
+        
+        self.num_relaxation_iters = num_relaxation_iters
+        assert isinstance(self.num_relaxation_iters, int) and self.num_relaxation_iters >= 1, \
+            "{} must be an {} greater than zero.".format("num_relaxation_iters", "integer")
+        
+        self.relaxation_constant = relaxation_constant
+        assert (isinstance(self.relaxation_constant, int) or isinstance(self.relaxation_constant, float)) \
+            and self.relaxation_constant > 0, \
+                "{} must be a {} number greater than zero.".format("relaxation_constant", "real")
+        
+        self.relaxation_method = relaxation_method
+        assert self.relaxation_method in ALLOWED_RELAXATION_METHODS, \
+            "{} must be one of {}.".format("relaxation_method", ALLOWED_RELAXATION_METHODS)
+        
+        # Check the validation settings.
+        self.num_validation_iters = num_validation_iters
+        assert isinstance(self.num_validation_iters, int) and self.num_validation_iters >= 1, \
+            "{} must be an {} greater than zero.".format("num_validation_iters", "integer")
+        
+        self.validation_size = validation_size
+        assert isinstance(self.validation_size, int) and self.validation_size >= 1, \
+            "{} must be an {} greater than zero.".format("validation_size", "integer")
+        
+        self.max_validation_size = max_validation_size
+        assert isinstance(self.max_validation_size, int) and self.validation_size >= 1, \
+            "{} must be an {} greater than zero.".format("max_validation_size", "integer")
+        if self.max_validation_size < self.validation_size:
+            self.max_validation_size = self.validation_size
+        
+        self.field_tol = field_tol
+        assert self.field_tol is None or isinstance(self.field_tol, int) or \
+            isinstance(self.field_tol, float), \
+                    "{} must be a {} number or None.".format("field_tol", "real")
+        
+        self.median_tol = median_tol
+        assert self.median_tol is None or isinstance(self.median_tol, int) or \
+            isinstance(self.median_tol, float), \
+                "{} must be a {} number or None.".format("median_tol", "real")
+        
+        self.mad_tol = mad_tol
+        assert self.mad_tol is None or isinstance(self.mad_tol, int) or \
+            isinstance(self.mad_tol, float), \
+                    "{} must be a {} number or None.".format("mad_tol", "real")
+        
+        self.eps = epsilon
+        assert (isinstance(self.mad_tol, int) or isinstance(self.eps, float)) and \
+            self.eps >= 0, "{} must be a {} number.".format("epsilon", "positive real")
+        
+        # Check the scaling settings.
+        self.dt = dt
+        assert isinstance(self.dt, int) or isinstance(self.dt, float) and self.dt > 0, \
+            "{} must be a {} number greater than 0.".format("dt", "real")
+        
+        self.scaling_par = scaling_par
+        assert isinstance(self.scaling_par, int) or isinstance(self.scaling_par, float) and \
+            self.scaling_par > 0, \
+                "{} must be a {} number greater than 0.".format("scaling_par", "real")
+        
+        # Check the masking settings.
+        self.mask = mask
+        assert self.mask is None or \
+            (isinstance(self.mask, np.ndarray) and \
+             self.mask.shape == self.frame_shape and \
+                 (np.issubdtype(self.mask.dtype, np.number) or mask.dtype == bool)), \
+                    "{} must be an ndarray of {} values with shape {}.".format("mask", "real", self.frame_shape)
+        
+        self.mask = mask.astype(bool) if mask is not None else None
+        self.frame_mask = self.mask if self.mask is not None else np.full(self.frame_shape, fill_value=False, dtype=bool)
+        
+        # Data type settings.
+        self.dtype_f = DTYPE_f if dtype_f == "float64" else np.float32
+        
+        # Initialize the process.
+        self.gpu_process = PTVGPU(frame_shape, **kwargs)
+    
+    def __call__(self, frame_a, frame_b, field=None):
+        """Computes velocity field from an image pair.
+        
+        Parameters
+        ----------
+        frame_a, frame_b : ndarray
+            2D arrays containing grey levels of the frames.
+        
+        field : ndarray
+            2D predictor field.
+        
+        Returns
+        -------
+        u, v : ndarray
+            2D arrays, horizontal/vertical components of the velocity field.
+        
+        """
+        frames = [frame_a, frame_b]
+
+        assert all(isinstance(frame, np.ndarray) for frame in frames) \
+            and all(frame.shape == self.frame_shape for frame in frames) \
+                and all(np.issubdtype(frame.dtype, np.number) for frame in frames) \
+                    and all(not np.iscomplexobj(frame) for frame in frames), \
+                        "Both frames must be ndarrays of {} values with shape {}.".format("real", self.frame_shape)
+        
+        if field is not None:
+            assert isinstance(field, tuple) and len(field) == 4 \
+                and all(isinstance(f, np.ndarray) for f in field) \
+                    and all(f.shape == field[0].shape for f in field) \
+                        and all(np.issubdtype(f.dtype, np.number) for f in field) \
+                            and all(not np.iscomplexobj(f) for f in field), \
+                                "field must be a tuple of four ndarrays (x, y, u, v) of real numbers."
+        
+        u, v = self.gpu_process(frame_a, frame_b, field=field)
+        return u.get(), v.get()
+    
+    @property
+    def init_coords(self):
+        """Returns the initial particle coordinates."""
+        coords_a, coords_b = self.gpu_process.init_coords
+        
+        return coords_a, coords_b
+    
+    @property
+    def coords(self):
+        """Returns the x and y components of the matched particle coordinates."""
+        x, y = self.gpu_process.coords
+        
+        return x, y
+
+class PTVGPU:
+    """Relaxation-based PTV algorithm.
+    
+    Algorithm Details
+    -----------------
+    This algorithm estimates an instantaneous two-dimensional velocity field from two consecutive
+    image frames using a probabilistic particle-matching approach. For each particle in the first
+    frame, candidate matches are identified within a specified search radius in the second frame.
+    Match probabilities are iteratively updated using a relaxation scheme. At each iteration,
+    the probability of a candidate increases if its displacement is more consistent with those of
+    neighboring particles, promoting spatial coherence in the resulting velocity field. Upon
+    reaching the maximum number of iterations, the candidate with the highest probability is
+    selected as the final match, yielding the particle displacement.
+    
+    References
+    ----------
+    Baek, S. J., & Lee, S. J. (1996). A new two-frame particle tracking algorithm using match probability.
+        Experiments in Fluids, 22, 23-32.
+        https://doi.org/10.1007/BF01893303
+    Westerweel, J., Scarano, F. (2005). Universal outlier detection for PIV data.
+        Experiments in Fluids, 39, 1096–1100.
+        https://doi.org/10.1007/s00348-005-0016-6
+    
+    Parameters
+    ----------
+    frame_shape : tuple of int
+        Image dimensions in pixels (height, width).
+    particle_method : {"log", "agt"}, optional
+        Method used for particle detection.
+    subpixel_method : {"gaussian", "centroid", "parabolic"}, optional
+        Method used for subpixel peak localization.
+    threshold : float or tuple, optional
+        Threshold for particle detection (Laplacian of Gaussian or adaptive Gaussian).
+    particle_size : int or tuple, optional
+        Half-size of the kernel used for particle detection.
+    search_size : int, optional
+        Radius for searching candidate particles in the second frame.
+    cluster_size : int, optional
+        Radius for identifying neighboring particles in the first frame.
+    kernel_size : int, optional
+        Maximum number of particles (power of 2) for candidate or neighbor sets.
+    batch_size : int, optional
+        Batch size for relaxation (not active for the current GPU version).
+    num_relaxation_iters : int, optional
+        Number of iterations for probability relaxation.
+    relaxation_constant : float, optional
+        Relaxation parameter (typically ~3) controlling convergence rate.
+    relaxation_method : {"unidirectional", "bidirectional"}, optional
+        Tracking direction, forward only or bidirectional.
+    num_validation_iters : int, optional
+        Number of iterations in the validation cycle.
+    validation_size : int, optional
+        Initial radius for the validation process.
+    max_validation_size : int, optional
+        Maximum radius for the adaptive validation process.
+    field_tol : float or None, optional
+        Tolerance for validation by predictor field.
+    median_tol : float or None, optional
+        Tolerance for median-based velocity validation.
+    mad_tol : float or None, optional
+        Tolerance for median-absolute-deviation (MAD) validation.
+    epsilon : float, optional
+        Small constant used in MAD validation (see Westerweel & Scarano, 2005).
+    dt : float, optional
+        Time delay between frames.
+    scaling_par : float, optional
+        Scaling factor applied to the velocity field.
+    mask : ndarray or None, optional
+        2D array where non-zero values indicate masked regions.
+    dtype_f : str, optional
+        Float data type (not active for the current GPU version).
+    
+    Attributes
+    ----------
+    init_coords : tuple of ndarray
+        Arrays (x, y) of initially detected particle positions.
+    coords : tuple of ndarray
+        Arrays (x, y) of matched particle positions after tracking.
     
     """
     def __init__(self,
@@ -155,10 +331,12 @@ class PTVGPU:
                  kernel_size=KERNEL_SIZE,
                  batch_size=BATCH_SIZE,
                  num_relaxation_iters=NUM_RELAXATION_ITERS,
-                 relaxation_method=RELAXATION_METHOD,
                  relaxation_constant=SIGMA,
+                 relaxation_method=RELAXATION_METHOD,
                  num_validation_iters=Num_VALIDATION_ITERS,
                  validation_size=VALIDATION_SIZE,
+                 max_validation_size=MAX_VALIDATION_SIZE,
+                 field_tol=FIELD_TOL,
                  median_tol=MEDIAN_TOL,
                  mad_tol=MAD_TOL,
                  epsilon=EPSILON,
@@ -172,20 +350,24 @@ class PTVGPU:
         self.n_dims = len(self.f_shape)
         self.particle_method = particle_method
         self.subpixel_method = subpixel_method
-        self.threshold = threshold
-        self.particle_size = particle_size        
+        self.threshold = (threshold,) * self.n_dims if isinstance(threshold, int) or \
+            isinstance(threshold, float) else threshold
+        self.particle_size = (particle_size,) * self.n_dims if isinstance(particle_size, int) \
+            else particle_size
         
         # Relaxation settings.
         self.search_size = search_size
         self.cluster_size = cluster_size
         self.kernel_size = kernel_size
         self.n_iters = num_relaxation_iters
-        self.relaxation_method = relaxation_method
         self.sigma = relaxation_constant
+        self.relaxation_method = relaxation_method
         
         # Validation settings.
         self.n_ietrs = num_validation_iters
         self.validation_size = validation_size
+        self.max_validation_size = max_validation_size
+        self.field_tol = field_tol
         self.median_tol = median_tol
         self.mad_tol = mad_tol
         self.eps = epsilon
@@ -220,13 +402,12 @@ class PTVGPU:
                                         cluster_size=self.cluster_size,
                                         kernel_size=self.kernel_size,
                                         num_relaxation_iters=self.n_iters,
-                                        relaxation_method=self.relaxation_method,
                                         sigma=self.sigma,
                                         dtype_f=self.dtype_f)
         
         # Initialize the validation object.
-        self.validation = ValidationGPU(self.ptv_field.f_shape,
-                                        size=validation_size,
+        self.validation = ValidationGPU(size=self.validation_size,
+                                        max_size=self.max_validation_size,
                                         kernel_size=self.kernel_size,
                                         median_tol=self.median_tol,
                                         mad_tol=self.mad_tol,
@@ -234,6 +415,19 @@ class PTVGPU:
                                         dtype_f=self.dtype_f)
     
     def __call__(self, frame_a, frame_b, field=None):
+        """Computes velocity field from an image pair.
+        
+        Parameters
+        ----------
+        frame_a, frame_b : ndarray
+            2D arrays containing grey levels of the frames.
+        
+        Returns
+        -------
+        u, v : ndarray
+            Arrays of horizontal/vertical components of the velocity field.
+        
+        """
         self.field = tuple(cp.asarray(f, dtype=self.dtype_f) for f in field) \
             if field is not None else None
         
@@ -244,12 +438,14 @@ class PTVGPU:
         self.coords_a, self.coords_b = self.get_coords(frame_a, frame_b, is_gpu=True)
         
         # Perform relaxation.
-        u, v = self.relaxation(ptv_field=self.ptv_field, field=self.field)
+        u, v = self.relaxation(ptv_field=self.ptv_field,
+                               field=self.field,
+                               relaxation_method=self.relaxation_method)
         
+        # Validate the fields.
         u, v = self.validate_fields(u, v)
         
-        return u.get(), v.get()
-        # return u, v
+        return u, v
     
     def mask_frames(self, frame_a, frame_b, mask=None):
         """Masks the frames."""
@@ -260,11 +456,10 @@ class PTVGPU:
         return frame_a, frame_b
     
     def get_coords(self, frame_a, frame_b, is_gpu=False):
-        "Returns the local particle coordinates."
+        """Returns the local particle coordinates."""
         coords_a, coords_b = self.ptv_field(frame_a, frame_b,
                                             threshold=self.threshold,
-                                            particle_size=self.particle_size,
-                                            dtype_f=self.dtype_f)
+                                            particle_size=self.particle_size)
         
         if not is_gpu:
             coords_a, coords_b = coords_a.get(), coords_b.get()
@@ -272,8 +467,10 @@ class PTVGPU:
         return coords_a, coords_b
     
     def validate_fields(self, u, v):
-        mask = self.validate_by_fields(u, v, field=self.field) if self.field is not None\
-            else self.validation(u, v, self.ptv_field, n_iters=self.n_ietrs)
+        """Returns the validated velocity field with outliers removed."""
+        mask = self.validate_by_fields(u, v, field=self.field) \
+            if self.field is not None and self.field_tol is not None \
+                else self.validation(u, v, self.ptv_field, n_iters=self.n_ietrs)
         
         if mask is not None:
             u = u[mask]
@@ -283,6 +480,7 @@ class PTVGPU:
         return u, v
     
     def validate_by_fields(self, u, v, field):
+        """Performs validation using the predictor field."""
         xp, yp, up, vp = field
         xp, yp = xp[0, :], yp[:, 0]
         
@@ -291,9 +489,8 @@ class PTVGPU:
         vp = interpn((yp, xp), vp, self.coords_a, bounds_error=False, fill_value=None)
         up, vp = up.astype(self.dtype_f), vp.astype(self.dtype_f)
         
-        eps = 1e-8
-        
         # Compute norms.
+        eps = 1e-8
         norm_u = cp.sqrt(u * u + v * v) + eps
         norm_p = cp.sqrt(up * up + vp * vp) + eps
         
@@ -301,37 +498,27 @@ class PTVGPU:
         dot = u * up + v * vp
         cos_theta = dot / (norm_u * norm_p)
         cos_theta = cp.clip(cos_theta, -1.0, 1.0)
-        r_a = cp.arccos(cos_theta)
         
-        # Magnitude residual (relative difference) ---
+        # Combined angle and magnitude residuals.
+        r_a = cp.arccos(cos_theta)
         r_m = cp.abs(norm_u - norm_p) / norm_p  # dimensionless
-    
-        # Combined residual
         r_star = cp.sqrt(r_a**2 + r_m**2)
-    
-        # Mask based on threshold
-        threshold = 0.3
-        mask = r_star < threshold
+        
+        # Mask based on tolerance.
+        mask = r_star < self.field_tol
         
         return mask
     
     @property
     def init_coords(self):
-        "Returns the initial particle coordinates."
+        """Returns the initial particle coordinates."""
         coords_a, coords_b = self.coords_a.get(), self.coords_b.get()
         
         return coords_a, coords_b
     
     @property
-    def matched_coords(self):
-        "Returns the matched particle coordinate pairs."
-        coords_a, coords_b = self.coords_a, self.coords_b
-        
-        return coords_a, coords_b
-    
-    @property
     def coords(self, is_gpu=True):
-        "Returns the x and y components of the matched particle coordinates."
+        """Returns the x and y components of the matched particle coordinates."""
         if self.coords_a is not None:
             x = self.coords_a[:, 1]
             y = self.coords_a[:, 0]
@@ -342,6 +529,22 @@ class PTVGPU:
         return x, y
 
 class PTVFIELDGPU:
+    """Contains geometric information of PTV field.
+    
+    Parameters
+    ----------
+    f_shape : tuple
+        Shape of the frames, (ht, wd).
+    modules: RawModule
+        Raw CUDA kernels for peak and subpixel identification.
+    particle_method : {"log", "agt"}, optional
+        Method used for particle detection.
+    subpixel_method : {"gaussian", "centroid", "parabolic"}, optional
+        Method to approximate the subpixel location of the peaks.
+    dtype_f : str, optional
+        Float data type (not active).
+    
+    """
     def __init__(self, f_shape,
                  modules,
                  particle_method=PARTICLE_METHOD,
@@ -366,9 +569,24 @@ class PTVFIELDGPU:
     
     def __call__(self, frame_a, frame_b,
                  threshold=THRESHOLD,
-                 particle_size=PARTICLE_SIZE,
-                 dtype_f=DTYPE_f):
+                 particle_size=PARTICLE_SIZE):
+        """Returns the locations of the subpixel peaks using the specified size and threshold.
         
+        Parameters
+        ----------
+        frame_a, frame_b : ndarray
+            Image pair.
+        threshold : tuple, optional
+            Threshold for particle detection.
+        particle_size : tuple, optional
+            Half-size of the kernel used for particle detection.
+        
+        Returns
+        -------
+        coords_a, coords_b : ndarray
+            Arrays, containing image coordinates of the detected particles.
+        
+        """
         threshold_a, threshold_b = threshold
         
         if self.particle_method == "log":
@@ -422,7 +640,7 @@ class PTVFIELDGPU:
         return labels, n_labels
     
     def get_labels_log(self, f, f_min, f_max, size=1, C=0):
-        """Performs a single-scale Laplacian of Gaussian blob detection (CuPy)."""
+        """Performs a single-scale Laplacian of Gaussian blob detection."""
         # Normalize the image.
         f = cp.asarray(f, dtype=self.dtype_f)
         f = (f - f_min) / (f_max - f_min + 1e-8)
@@ -539,7 +757,7 @@ class PTVFIELDGPU:
         return coords, mask
     
     def get_coords(self, f, f_min, f_max, size=1, C=0):
-        "Returns the image coordinates of the detected particles."
+        """Returns the image coordinates of the detected particles."""
         # Get the labels using the specified method.
         if self.particle_method == "agt":
             labels, n_labels = self.get_labels_agt(f, f_min, f_max, kernel_size=size, C=C)
@@ -551,12 +769,36 @@ class PTVFIELDGPU:
         return self.get_subpixel(f, y_peak, x_peak)
 
 class RelaxationGPU:
+    """Performs particle matching using probability relaxation.
+    
+    Parameters
+    ----------
+    modules: RawModule
+        Raw CUDA kernels for neighbor search, candidate selection, and probability updates.
+    search_size : int, optional
+        Radius for searching candidate particles.
+    cluster_size : int, optional
+        Radius for identifying neighboring particles.
+    kernel_size : int, optional
+        Maximum number of particles (power of 2) for candidate or neighbor sets.
+    num_relaxation_iters : int, optional
+        Number of iterations for probability relaxation.
+    sigma : float, optional
+        Relaxation parameter (typically ~3) controlling convergence rate.
+    dtype_f : str, optional
+        Float data type (not active).
+    
+    Attributes
+    ----------
+    coords : tuple of ndarray
+        Arrays (x, y) of matched particle positions after tracking.
+    
+    """
     def __init__(self, modules,
                  search_size=SEARCH_SIZE,
                  cluster_size=CLUSTER_SIZE,
                  kernel_size=KERNEL_SIZE,
                  num_relaxation_iters=NUM_RELAXATION_ITERS,
-                 relaxation_method=RELAXATION_METHOD,
                  sigma=SIGMA,
                  dtype_f=DTYPE_f):
         
@@ -564,7 +806,6 @@ class RelaxationGPU:
         self.cluster_size = cluster_size
         self.kernel_size = kernel_size
         self.n_iters = num_relaxation_iters
-        self.relaxation_method = relaxation_method
         self.sigma = sigma
         
         (self.mod_fill_matrix,
@@ -575,9 +816,27 @@ class RelaxationGPU:
         self.dtype_i = np.int32 if dtype_f is not DTYPE_f else DTYPE_i
         self.dtype_b = DTYPE_b
     
-    def __call__(self, ptv_field, field=None):
+    def __call__(self, ptv_field, field=None, relaxation_method=RELAXATION_METHOD):
+        """Returns the displacement field using the specified direction.
+        
+        Parameters
+        ----------
+        ptv_field : PTVFieldGPU
+            Geometric information for the particle tracking field.
+        field : tuple or None, optional
+            Predictor field used to shift the search region.
+        relaxation_method : {"unidirectional", "bidirectional"}, optional
+            Tracking direction, forward only or bidirectional.
+        
+        Returns
+        -------
+        u, v : ndarray
+            2D arrays, displacement components of the matched particle coordinates.
+        
+        """
         self.ptv_field = ptv_field
         self.field = field
+        self.relaxation_method = relaxation_method
         
         # Forward particle matching.
         field = self.interpolate_field(self.ptv_field.coords_a,
@@ -621,6 +880,7 @@ class RelaxationGPU:
         return u, v
     
     def interpolate_field(self, coords, mask, field, direction="forward"):
+        """Interpolates the predictor field onto particle coordinates."""
         if field is not None:
             coords = coords[~mask]
             x, y, u, v = field
@@ -641,6 +901,7 @@ class RelaxationGPU:
         return field
     
     def get_candidates(self, coords_a, coords_b, mask_a, mask_b, Ra, Rb, field=None):
+        """Groups neighboring and candidate particles into clusters."""
         block_size = BLOCK_SIZE
         
         # Create dummy variables if field not given.
@@ -713,10 +974,11 @@ class RelaxationGPU:
                           u,
                           v,
                           delta))
-        print(Na.max(), Nb.max())
+        
         return delta, indices, Nb, Na
     
-    def update_probs(self, delta, indices, Nb, Na, n_iters=0, sigma=2):
+    def update_probs(self, delta, indices, Nb, Na, n_iters=0, sigma=1):
+        """Updates the probability matrix using relaxation."""
         block_size = BLOCK_SIZE
         grid_size = ceil(self.kernel_size / block_size)
         
@@ -755,6 +1017,7 @@ class RelaxationGPU:
         return P[:, 0, :]
     
     def match_particles(self, coords_a, coords_b, mask_a, mask_b, Ra, Rb, field=None):
+        """Performs particle matching using probability relaxation."""
         # Clustering coordinates in instance a and b.
         delta, indices, Nb, Na = self.get_candidates(coords_a,
                                                      coords_b,
@@ -768,9 +1031,11 @@ class RelaxationGPU:
         
         # Return displacement with maximum probability.
         u, v = self.get_displacement(P, delta)
+        
         return u, v
     
     def bidirectional_validation(self, ua, va, ub, vb):
+        """Performs bidirectional validation."""
         # Forward and backward vectors
         forward = cp.column_stack((ua, va))
         backward = cp.column_stack((-ub, -vb))
@@ -780,6 +1045,7 @@ class RelaxationGPU:
         return ua, va
     
     def get_displacement(self, P, delta):
+        """Returns the displacement of the matched particles."""
         j_peak = cp.argmax(P, axis=1)
         i_peak = cp.arange(self.N)
         
@@ -787,17 +1053,19 @@ class RelaxationGPU:
         u = u[i_peak, j_peak]
         v = v[i_peak, j_peak]
         
-        # # Ensure the peak values are unique.
-        # P_peak = cp.max(P, axis=1, keepdims=True)
-        # n_peak = cp.sum(P == P_peak, axis=1)
-        # mask = n_peak != 1
-        # u[mask], v[mask] = cp.nan, cp.nan
+        # Ensure the peak values are unique.
+        P_peak = cp.max(P, axis=1, keepdims=True)
+        n_peak = cp.sum(P == P_peak, axis=1)
+        mask = n_peak != 1
+        u[mask], v[mask] = cp.nan, cp.nan
         return u, v
     
     @property
     def coords(self):
+        """Returns the x and y components of the matched particle coordinates."""
         x = self.ma[:, 1] if self.ma is not None else None
         y = self.ma[:, 0] if self.ma is not None else None
+        
         return x, y
 
 code_get_peak = """

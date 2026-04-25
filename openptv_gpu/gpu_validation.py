@@ -10,6 +10,7 @@ from . import DTYPE_i, DTYPE_f
 # Default validation settings.
 Num_VALIDATION_ITERS = 1
 VALIDATION_SIZE = 1
+MAX_VALIDATION_SIZE = 1
 MEDIAN_TOL = None
 MAD_TOL = 2
 EPSILON = 0
@@ -17,20 +18,40 @@ BLOCK_SIZE = 8
 KERNEL_SIZE = 128
 
 class ValidationGPU:
-    def __init__(self, f_shape,
-                 size=VALIDATION_SIZE,
+    """Validates velocity and returns an array indicating which locations need to be removed.
+    
+    Parameters
+    ----------
+    size : int, optional
+        Initial radius for the validation process.
+    max_size : int, optional
+        Maximum radius for the adaptive validation process.
+    kernel_size : int, optional
+        Maximum number of particles (power of 2) for neighbor sets.
+    median_tol : float or None, optional
+        Tolerance for median-based velocity validation.
+    mad_tol : float or None, optional
+        Tolerance for median-absolute-deviation (MAD) validation.
+    epsilon : float, optional
+        Small constant used in MAD validation.
+    dtype_f : str, optional
+        Float data type (not active).
+    
+    """
+    def __init__(self, size=VALIDATION_SIZE,
+                 max_size=MAX_VALIDATION_SIZE,
                  kernel_size=KERNEL_SIZE,
                  median_tol=MEDIAN_TOL,
                  mad_tol=MAD_TOL,
                  epsilon=EPSILON,
                  dtype_f=DTYPE_f):
         
-        self.f_shape = f_shape
         self.mod_fill_kernel = cp.RawModule(code=code_fill_kernel)
         
         self.validation_tols = {"median": median_tol, "mad": mad_tol}
         self.eps = epsilon
         self.size = size
+        self.max_size = max_size
         self.kernel_size = kernel_size
         
         self.dtype_f = dtype_f
@@ -38,19 +59,21 @@ class ValidationGPU:
         self.init_data()
     
     def __call__(self, u, v, ptv_field, n_iters=Num_VALIDATION_ITERS):
-        """Returns an array indicating which indices need to be validated.
+        """Returns an array indicating which positions need to be removed.
         
         Parameters
         ----------
-        f : ndarray
-            Input velocity fields to be validated.
-        mask : ndarray or None, optional
-            2D mask for the velocity fields.
+        u, v : ndarray
+            Input velocity field to be validated.
+        ptv_field : PTVFieldGPU
+            Geometric information for the particle tracking field.
+        n_iters : int, optional
+            Number of iterations in the validation cycle.
         
         Returns
         -------
-        val_locations : ndarray
-            2D boolean array of locations that need to be validated.
+        mask : ndarray
+            2D boolean array of locations that need to be removed.
         
         """
         self.init_data()
@@ -81,8 +104,6 @@ class ValidationGPU:
         self.f = None
         self.f_median = None
         self.f_mad = None
-        self.f_mean = None
-        self.val_locations = None
     
     def median_validation(self):
         """Performs median validation on each field."""
@@ -100,7 +121,7 @@ class ValidationGPU:
         return cp.any(cp.stack(mask, axis=0), axis=0)
     
     def get_stats(self, method="median"):
-        """Returns a field containing the statistics of the neighbouring points in each kernel."""
+        """Returns a field containing the statistics of the neighbouring points in each cluster."""
         fm = [cp.full(self.ptv_field.Na, fill_value=cp.nan, dtype=self.dtype_f) for k in range(self.n_fields)]
         
         # Select the method.
@@ -116,6 +137,7 @@ class ValidationGPU:
         return fm
     
     def fill_kernel(self, delta):
+        """Identifies neighboring particles and populates the neighbor velocity matrix."""
         Na = cp.ones((self.ptv_field.Na,), dtype=self.dtype_i)
         f = cp.full((self.ptv_field.Na, self.kernel_size, self.n_fields), cp.nan, dtype=self.dtype_f)
         R = cp.full((self.ptv_field.Na,), fill_value=self.size, dtype=self.dtype_i)
@@ -124,6 +146,7 @@ class ValidationGPU:
         size = self.size
         cuda_fill_kernel = self.mod_fill_kernel.get_function('cuda_fill_kernel')
         
+        # Iteratively increase the neighborhood radius.
         for _ in range(self.n_iters):
             window_size = 2 ** ceil(log2(2 * size))
             grid_size = ceil(window_size / block_size)
@@ -140,9 +163,8 @@ class ValidationGPU:
                               self.dtype_i(self.ptv_field.N),
                               Na,
                               f))
-            R[Na < 20] += 1
+            R[Na < self.max_size] += 1
             size += 1
-        print(Na.max(), Na.min())
         
         return f
     
