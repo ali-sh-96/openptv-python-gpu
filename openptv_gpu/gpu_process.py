@@ -1,4 +1,4 @@
-"""This module contains algorithms for PTV image analysis with an NVIDIA GPU."""
+"""This module contains algorithms for PTV analysis on an NVIDIA GPU."""
 
 import numpy as np
 import cupy as cp
@@ -225,6 +225,10 @@ class ptv_gpu:
         
         u, v = self.gpu_process(frame_a, frame_b, field=field)
         return u.get(), v.get()
+    
+    def get_coords(self, frame_a, frame_b):
+        """Returns the local particle coordinates."""
+        return self.gpu_process.get_coords(frame_a, frame_b, is_gpu=False)
     
     @property
     def init_coords(self):
@@ -974,6 +978,9 @@ class RelaxationGPU:
                           u,
                           v,
                           delta))
+        
+        if int(Na.max()) >= self.kernel_size or int(Nb.max()) >= self.kernel_size:
+            raise ValueError("Overflow detected: kernel_size is too small.")
         
         return delta, indices, Nb, Na
     
