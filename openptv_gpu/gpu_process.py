@@ -505,7 +505,7 @@ class PTVGPU:
         
         # Combined angle and magnitude residuals.
         r_a = cp.arccos(cos_theta)
-        r_m = cp.abs(norm_u - norm_p) / norm_p  # dimensionless
+        r_m = cp.abs(norm_u - norm_p) / norm_p
         r_star = cp.sqrt(r_a**2 + r_m**2)
         
         # Mask based on tolerance.
@@ -649,21 +649,21 @@ class PTVFIELDGPU:
         f = cp.asarray(f, dtype=self.dtype_f)
         f = (f - f_min) / (f_max - f_min + 1e-8)
         
-        # Laplacian of Gaussian
+        # Laplacian of Gaussian.
         sigma = size
         log = gaussian_laplace(f, sigma=sigma)
         
-        # Scale normalization
+        # Scale normalization.
         log = cp.abs(log) * sigma**2
         
-        # Thresholding
+        # Perform thresholding.
         mask = log > C
         
-        # Local maxima in 3×3 window
+        # Local maxima in 3×3 window.
         peak = maximum_filter(log, size=3)
         mask &= (log == peak)
         
-        # Connected-component labeling on GPU
+        # Connected-component labeling on GPU.
         labels, n_labels = label(mask)
         
         return labels, n_labels
