@@ -26,7 +26,7 @@ Finally, add the directory of the cloned repository to your PYTHONPATH:
     sys.path.append(openptv_gpu_path)
 
 ## Tutorials
-- [Feature tutorial](https://colab.research.google.com/github/ali-sh-96/openptv-python-gpu/blob/main/openptv_gpu/tutorials/openptv_python_gpu_fature_tutorial.ipynb)
+- [Feature tutorial](https://colab.research.google.com/github/ali-sh-96/openptv-python-gpu/blob/main/openptv_gpu/tutorials/openptv_python_gpu_feature_tutorial.ipynb)
 - [Basic tutorial](https://colab.research.google.com/github/ali-sh-96/openptv-python-gpu/blob/main/openptv_gpu/tutorials/openptv_python_gpu_tutorial.ipynb)
 - [Predictor tutorial](https://colab.research.google.com/github/ali-sh-96/openptv-python-gpu/blob/main/openptv_gpu/tutorials/openptv_python_gpu_predictor_tutorial.ipynb)
 
