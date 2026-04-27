@@ -435,9 +435,6 @@ class PTVGPU:
         self.field = tuple(cp.asarray(f, dtype=self.dtype_f) for f in field) \
             if field is not None else None
         
-        # Mask the frames.
-        self.frame_a, self.frame_b = self.mask_frames(frame_a, frame_b, mask=self.mask)
-        
         # Get the particle coordinates.
         self.coords_a, self.coords_b = self.get_coords(frame_a, frame_b, is_gpu=True)
         
@@ -451,16 +448,11 @@ class PTVGPU:
         
         return u, v
     
-    def mask_frames(self, frame_a, frame_b, mask=None):
-        """Masks the frames."""
-        if mask is not None:
-            frame_a[mask] = 0
-            frame_b[mask] = 0
-        
-        return frame_a, frame_b
-    
     def get_coords(self, frame_a, frame_b, is_gpu=False):
         """Returns the local particle coordinates."""
+        # Mask the frames.
+        self.frame_a, self.frame_b = self.mask_frames(frame_a, frame_b, mask=self.mask)
+        
         coords_a, coords_b = self.ptv_field(frame_a, frame_b,
                                             threshold=self.threshold,
                                             particle_size=self.particle_size)
@@ -469,6 +461,14 @@ class PTVGPU:
             coords_a, coords_b = coords_a.get(), coords_b.get()
         
         return coords_a, coords_b
+    
+    def mask_frames(self, frame_a, frame_b, mask=None):
+        """Masks the frames."""
+        if mask is not None:
+            frame_a[mask] = 0
+            frame_b[mask] = 0
+        
+        return frame_a, frame_b
     
     def validate_fields(self, u, v):
         """Returns the validated velocity field with outliers removed."""
