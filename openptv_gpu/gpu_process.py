@@ -250,21 +250,24 @@ class PTVGPU:
     Algorithm Details
     -----------------
     This algorithm estimates an instantaneous two-dimensional velocity field from two consecutive
-    image frames using a probabilistic particle-matching approach. For each particle in the first
-    frame, candidate matches are identified within a specified search radius in the second frame.
-    Match probabilities are iteratively updated using a relaxation scheme. At each iteration,
-    the probability of a candidate increases if its displacement is more consistent with those of
-    neighboring particles, promoting spatial coherence in the resulting velocity field. Upon
-    reaching the maximum number of iterations, the candidate with the highest probability is
-    selected as the final match, yielding the particle displacement.
+    image frames using a probabilistic particle-matching framework. During particle detection,
+    spatial hashing is employed to partition the image domain and accelerate neighbor searches.
+    For each particle in the first frame, candidate matches are identified within a prescribed
+    search radius in the second frame. A network of candidate correspondences is then constructed
+    by considering neighboring particles and their potential matches. Match probabilities are
+    subsequently updated iteratively using a relaxation scheme. At each iteration, the probability
+    of a given candidate increases if its displacement is consistent with those of neighboring
+    particles, thereby promoting spatial coherence in the velocity field. Upon reaching the maximum
+    number of iterations, the candidate with the highest probability is selected as the final match,
+    yielding the particle displacement.
     
     References
     ----------
     Baek, S. J., & Lee, S. J. (1996). A new two-frame particle tracking algorithm using match probability.
-        Experiments in Fluids, 22, 23-32.
+        Experiments in Fluids, 22(1), 23-32.
         https://doi.org/10.1007/BF01893303
     Westerweel, J., Scarano, F. (2005). Universal outlier detection for PIV data.
-        Experiments in Fluids, 39, 1096–1100.
+        Experiments in Fluids, 39(6), 1096–1100.
         https://doi.org/10.1007/s00348-005-0016-6
     
     Parameters
@@ -298,7 +301,7 @@ class PTVGPU:
     validation_size : int, optional
         Initial radius for the validation process.
     max_validation_size : int, optional
-        Maximum radius for the adaptive validation process.
+        Maximum number of neighbors for the adaptive validation process.
     field_tol : float or None, optional
         Tolerance for validation by predictor field.
     median_tol : float or None, optional

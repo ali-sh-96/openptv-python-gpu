@@ -25,7 +25,7 @@ class ValidationGPU:
     size : int, optional
         Initial radius for the validation process.
     max_size : int, optional
-        Maximum radius for the adaptive validation process.
+        Maximum number of neighbors for the adaptive validation process.
     kernel_size : int, optional
         Maximum number of particles (power of 2) for neighbor sets.
     median_tol : float or None, optional
