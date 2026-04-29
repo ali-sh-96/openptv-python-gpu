@@ -397,6 +397,8 @@ class PTVGPU:
         self.mod_update_probs = cp.RawModule(code=code_update_probs)
         
         # Initialize the field object.
+        self.coords_a, self.coords_b = None, None
+        self.coords_i, self.coords_j = None, None
         self.ptv_field = PTVFIELDGPU(self.f_shape,
                                      modules=self.mod_get_peak,
                                      particle_method=self.particle_method,
@@ -443,6 +445,7 @@ class PTVGPU:
         
         # Get the particle coordinates.
         self.coords_a, self.coords_b = self.get_coords(frame_a, frame_b, is_gpu=True)
+        self.coords_i, self.coords_j = self.coords_a, self.coords_b
         
         # Perform relaxation.
         u, v = self.relaxation(ptv_field=self.ptv_field,
@@ -522,7 +525,7 @@ class PTVGPU:
     @property
     def init_coords(self):
         """Returns the initial particle coordinates."""
-        coords_a, coords_b = self.coords_a.get(), self.coords_b.get()
+        coords_a, coords_b = self.coords_i.get(), self.coords_j.get()
         
         return coords_a, coords_b
     
