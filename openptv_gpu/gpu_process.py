@@ -429,6 +429,9 @@ class PTVGPU:
         frame_a, frame_b : ndarray
             2D arrays containing grey levels of the frames.
         
+        field : tuple of ndarray or None, optional
+            Predictor field arrays in the form (x, y, u, v).
+        
         Returns
         -------
         u, v : ndarray
